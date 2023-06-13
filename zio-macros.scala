@@ -41,9 +41,7 @@ object MonoServiceBacking:
 
     val (fnType, rt) = TypeRepr.of[A].memberType(methodSymbol).asMatchable match
       case MethodType(_, types, rtypeRepr) =>
-        val rt = rtypeRepr.asType match
-          case '[UIO[r]] => TypeRepr.of[ZIO[A, Nothing, r]]
-          case '[r]      => TypeRepr.of[ZIO[A, Nothing, r]]
+        val rt = getReturnTyp(rtypeRepr)
 
         Symbol
           .classSymbol(s"scala.Function${types.size}")
