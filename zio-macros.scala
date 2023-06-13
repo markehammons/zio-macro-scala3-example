@@ -1,6 +1,13 @@
 //>using scala "3.3.0"
 import scala.quoted.*
 
+
+def getReturnTyp[F](using q: Quotes)(in: q.reflect.TypeRepr)(using Type[F]): q.reflect.TypeRepr = 
+  import quotes.reflect.*
+  in.dealias.asType match 
+    case '[ZIO[Nothing, b,c]] => TypeRepr.of[ZIO[F,b,c]]
+    case '[ZIO[a,b,c]] => TypeRepr.of[ZIO[a & F, b, c]]
+    case '[c] => TypeRepr.of[ZIO[F,Nothing,c]]
 class MonoServiceBacking[F](defs: Array[AnyRef]) extends Selectable:
   transparent inline def applyDynamic(
       inline name: String,

@@ -9,6 +9,109 @@ object MonoService:
     derivedImpl[F]()
   }
 
+  private def callServiceWithZIO[A, B, C, F, R](using
+      q: Quotes
+  )(using Type[A], Type[B], Type[C], Type[F], Type[R])(
+      methodInputs: List[q.reflect.Term],
+      owner: q.reflect.Symbol,
+      methodSymbol: q.reflect.Symbol
+  ): Expr[ZIO[R, B, C]] =
+    import quotes.reflect.*
+    val zio = TypeRepr.of[ZIO.type].classSymbol.get
+
+    val method = zio.methodMember("serviceWithZIO").head
+
+    '{
+      val zio = ZIO
+      ${
+        Apply(
+          TypeApply(
+            Select(
+              TypeApply(
+                Select('{ zio }.asTerm, method),
+                List(TypeTree.of[F])
+              ),
+              TypeRepr
+                .of[ZIO.WithZIO]
+                .classSymbol
+                .get
+                .declaredMethod("apply")
+                .head
+            ),
+            List(TypeTree.of[B], TypeTree.of[C], TypeTree.of[A], TypeTree.of[R])
+          ),
+          List(
+            Lambda(
+              owner,
+              MethodType(List("f"))(
+                _ => List(TypeRepr.of[F]),
+                _ => TypeRepr.of[ZIO[A, B, C]]
+              ),
+              (symbol, inputs) =>
+                Apply(
+                  Select(inputs.head.asExpr.asTerm, methodSymbol),
+                  methodInputs.map(_.asExpr.asTerm)
+                ).changeOwner(symbol)
+                  .asExprOf[ZIO[A, B, C]]
+                  .asTerm
+            )
+          )
+        ).asExprOf[ZIO[R, B, C]]
+      }
+    }
+
+  private def callServiceWithPure[A, F](using
+      q: Quotes
+  )(using Type[A], Type[F])(
+      methodInputs: List[q.reflect.Term],
+      owner: q.reflect.Symbol,
+      methodSymbol: q.reflect.Symbol
+  ): Expr[AnyRef] =
+    import quotes.reflect.*
+    val zio = TypeRepr.of[ZIO.type].classSymbol.get
+
+    val method = zio.methodMember("serviceWithPure").head
+
+    val lambda = Lambda(
+      owner,
+      MethodType(List("f"))(
+        _ => List(TypeRepr.of[F]),
+        _ => TypeRepr.of[A]
+      ),
+      (symbol, inputs) =>
+        Apply(
+          Select(inputs.head.asExpr.asTerm, methodSymbol),
+          methodInputs
+        ).changeOwner(symbol).asExprOf[A].asTerm
+    )
+
+    '{
+      val zio = ZIO
+
+      ${
+        Apply(
+          TypeApply(
+            Select(
+              TypeApply(
+                Select('{ zio }.asTerm, method),
+                List(TypeTree.of[F])
+              ),
+              TypeRepr
+                .of[ZIO.WithPure]
+                .classSymbol
+                .get
+                .declaredMethod("apply")
+                .head
+            ),
+            List(TypeTree.of[A])
+          ),
+          List(
+            lambda
+          )
+        ).asExprOf[AnyRef]
+      }
+    }
+
   private def getFn[F](name: String)(using Quotes, Type[F]): Expr[AnyRef] =
     import quotes.reflect.*
 
@@ -16,65 +119,30 @@ object MonoService:
 
     val methodSymbol = f.methodMember(name).head
 
-    val (methodType, rt) = TypeRepr.of[F].memberType(methodSymbol) match
+    val (methodType, ort, crt) = TypeRepr.of[F].memberType(methodSymbol) match
       case MethodType(names, types, rtypeRepr) =>
         val rt = rtypeRepr.dealias.asType match
-          case '[UIO[r]] => TypeRepr.of[ZIO[F, Nothing, r]]
-          case '[r]      => TypeRepr.of[ZIO[F, Nothing, r]]
+          case '[ZIO[Nothing, b, c]] => TypeRepr.of[ZIO[F, b, c]]
+          case '[ZIO[a, b, c]]       => TypeRepr.of[ZIO[F & a, b, c]]
+          case '[r]                  => TypeRepr.of[ZIO[F, Nothing, r]]
 
-        MethodType(names)(_ => types, _ => rt) -> rtypeRepr
+        (MethodType(names)(_ => types, _ => rt), rtypeRepr, rt)
 
     val lambda = Lambda
       .apply(
         Symbol.spliceOwner,
         methodType,
         (symbol, methodInputs) =>
-          val zio = TypeRepr.of[ZIO.type].classSymbol.get
-
-          val method = zio.methodMember("serviceWithZIO").head
-
-          '{
-            val zio = ZIO
-            ${
-              rt.dealias.widen.asType match
-                case '[ZIO[Nothing, b, c]] =>
-                  Apply(
-                    TypeApply(
-                      Select(
-                        TypeApply(
-                          Select('{ zio }.asTerm, method),
-                          List(TypeTree.of[F])
-                        ),
-                        TypeRepr
-                          .of[ZIO.WithZIO]
-                          .classSymbol
-                          .get
-                          .declaredMethod("apply")
-                          .head
-                      ),
-                      List(TypeTree.of[b], TypeTree.of[c])
-                    ),
-                    List(
-                      Lambda(
-                        symbol,
-                        MethodType(List("f"))(
-                          _ => List(TypeRepr.of[F]),
-                          _ => rt
-                        ),
-                        (symbol, inputs) =>
-                          Apply(
-                            Select(inputs.head.asExpr.asTerm, methodSymbol),
-                            methodInputs.map(_.asExpr.asTerm)
-                          ).changeOwner(symbol)
-                            .asExprOf[ZIO[Nothing, b, c]]
-                            .asTerm
-                      )
-                    )
-                  ).asExpr
-
-                case '[t] => report.errorAndAbort(Type.show[t])
-            }
-          }.asTerm.changeOwner(symbol)
+          val methodTerms = methodInputs.map(_.asExpr.asTerm)
+          (ort.dealias.asType, crt.asType) match
+            case ('[ZIO[a, b, c]], '[ZIO[d,?,?]]) =>
+              callServiceWithZIO[a, b, c, F, d](
+                methodTerms,
+                symbol,
+                methodSymbol
+              ).asTerm.changeOwner(symbol)
+            case ('[a], _) => 
+              callServiceWithPure[a, F](methodTerms, symbol, methodSymbol).asTerm.changeOwner(symbol)
       )
       .asExprOf[AnyRef]
 
@@ -108,9 +176,8 @@ object MonoService:
       .map(TypeRepr.of[F].memberType)
       .map:
         case MethodType(names, inputs, returnType) =>
-          val mt = returnType.dealias.asType match
-            case '[ZIO[Nothing, b, c]] =>
-              MethodType(names)(_ => inputs, _ => TypeRepr.of[ZIO[F, b, c]])
+          val mt =
+            MethodType(names)(_ => inputs, _ => getReturnTyp[F](returnType))
 
           report.warning(mt.show)
           mt
@@ -123,7 +190,7 @@ object MonoService:
         case (backing, (name, repr)) =>
           Refinement(backing, name, repr)
 
-    //report.errorAndAbort(refined.show)
+    // report.errorAndAbort(refined.show)
     refined.asType match
       case '[a] =>
         '{
